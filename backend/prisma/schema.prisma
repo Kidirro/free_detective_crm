@@ -53,6 +53,7 @@ model Case {
   evidence Json @default("[]")
   theories Json @default("[]")
   folders Json @default("[]")
+  boardLayout Json @default("{}")
   report String @default("") @db.Text
   reportUrl String?
   lead User @relation("CaseLead", fields: [leadId], references: [id])

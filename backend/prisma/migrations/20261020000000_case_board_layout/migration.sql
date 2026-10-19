@@ -1,0 +1,1 @@
+ALTER TABLE "Case" ADD COLUMN "boardLayout" JSONB NOT NULL DEFAULT '{}';

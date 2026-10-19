@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import './App.css'
 import { api, patch as apiPatch, post } from './api'
@@ -10,6 +10,7 @@ type CaseFile = {
   id: string; dbId?: string; title: string; status: CaseStatus; priority: 'Критический' | 'Высокий' | 'Средний' | 'Низкий'
   lead: string; members: string[]; created: string; summary: string; location: string
   suspects: string[]; victims: string[]; witnesses: string[]; evidence: string[]; theories: string[]; report?: string
+  boardLayout?: Record<string, { x: number; y: number }>
 }
 type Task = { id: number | string; title: string; due: string; assignee?: string; assigneeId?: string; done: boolean; report?: string; tag: string }
 
@@ -67,6 +68,7 @@ function App() {
   const [search, setSearch] = useState('')
   const [toast, setToast] = useState('')
   const [online, setOnline] = useState(false)
+  const [authenticated, setAuthenticated] = useState(false)
 
   const notify = (text: string) => { setToast(text); window.setTimeout(() => setToast(''), 2600) }
   const current = user || people[0]
@@ -78,12 +80,13 @@ function App() {
         await api('/health'); setOnline(true)
         const me = await api<any>('/auth/me').catch(() => null)
         if (!me) return
+        setAuthenticated(true)
         const [remotePeople, remoteCases, remoteTasks] = await Promise.all([api<any[]>('/users'), api<any[]>('/cases'), api<any[]>('/tasks')])
         const mappedPeople = remotePeople.map(p => ({ id: p.id, name: `${p.firstName} ${p.lastName}`, callsign: p.callsign, initials: `${p.firstName[0] || ''}${p.lastName[0] || ''}`.toUpperCase() }))
         const statuses: Record<string, CaseStatus> = { ACTIVE: 'Активно', WAITING: 'Ожидает', CLOSED: 'Закрыто' }
         const priorities: Record<string, CaseFile['priority']> = { CRITICAL: 'Критический', HIGH: 'Высокий', MEDIUM: 'Средний', LOW: 'Низкий' }
         setPeople(mappedPeople); setUser(mappedPeople.find(p => p.id === me.id) || mappedPeople[0])
-        setCases(remoteCases.map(c => ({ id: String(c.number).padStart(4, '0'), dbId: c.id, title: c.title, status: statuses[c.status], priority: priorities[c.priority], lead: c.lead.callsign, members: [], created: new Date(c.createdAt).toLocaleDateString('ru-RU'), location: c.location || 'Не установлено', summary: c.summary, suspects: c.suspects, victims: c.victims, witnesses: c.witnesses, evidence: c.evidence, theories: c.theories, report: c.report || '' })))
+        setCases(remoteCases.map(c => ({ id: String(c.number).padStart(4, '0'), dbId: c.id, title: c.title, status: statuses[c.status], priority: priorities[c.priority], lead: c.lead.callsign, members: [], created: new Date(c.createdAt).toLocaleDateString('ru-RU'), location: c.location || 'Не установлено', summary: c.summary, suspects: c.suspects, victims: c.victims, witnesses: c.witnesses, evidence: c.evidence, theories: c.theories, report: c.report || '', boardLayout: c.boardLayout || {} })))
         setTasks(remoteTasks.map(t => ({ id: t.id, title: t.title, due: t.dueLabel || 'Без срока', tag: t.tag, done: t.status === 'DONE', report: t.report, assignee: t.assignee?.callsign, assigneeId: t.assigneeId })))
       } catch { setOnline(false) }
     }
@@ -97,7 +100,7 @@ function App() {
     if (online) { try { id = (await post<any>('/auth/register', { name, callsign, secretCode: String(fd.get('code')) })).id } catch (error) { return notify(error instanceof Error ? error.message : 'Не удалось создать профиль') } }
     else if (fd.get('code') !== 'NOIR-47') return notify('Секретный код не принят')
     const p = { id, name, callsign, initials: name.split(' ').map(x => x[0]).join('').slice(0, 2).toUpperCase() }
-    setPeople([...people, p]); setUser(p); setModal(null); notify(`Профиль «${callsign}» создан`)
+    setPeople([...people, p]); setUser(p); setAuthenticated(online); setModal(null); notify(`Профиль «${callsign}» создан`)
   }
 
   async function login(e: FormEvent<HTMLFormElement>) {
@@ -105,7 +108,7 @@ function App() {
     try {
       const remote = await post<any>('/auth/login', { callsign: String(fd.get('callsign')), secretCode: String(fd.get('code')) })
       const p = { id: remote.id, name: `${remote.firstName} ${remote.lastName}`, callsign: remote.callsign, initials: `${remote.firstName[0] || ''}${remote.lastName[0] || ''}`.toUpperCase() }
-      setUser(p); if (!people.some(x => x.id === p.id)) setPeople([...people, p]); setModal(null); notify(`Добро пожаловать, ${p.callsign}`); window.setTimeout(() => window.location.reload(), 400)
+      setUser(p); setAuthenticated(true); if (!people.some(x => x.id === p.id)) setPeople([...people, p]); setModal(null); notify(`Добро пожаловать, ${p.callsign}`); window.setTimeout(() => window.location.reload(), 400)
     } catch (error) { notify(error instanceof Error ? error.message : 'Не удалось войти') }
   }
 
@@ -129,6 +132,23 @@ function App() {
     if (online && selected.dbId) void apiPatch(`/cases/${selected.dbId}`, { report: value }).catch(() => notify('Не удалось сохранить отчёт'))
   }
 
+  function saveLayout(layout: Record<string, { x: number; y: number }>) {
+    if (!selected) return
+    const updated = { ...selected, boardLayout: layout }
+    setSelected(updated); setCases(cases.map(c => c.id === updated.id ? updated : c))
+    if (online && selected.dbId) void apiPatch(`/cases/${selected.dbId}`, { boardLayout: layout }).catch(() => notify('Не удалось сохранить положение карточек'))
+  }
+
+  async function updateTask(task: Task, change: 'assign' | 'done') {
+    if (online && !authenticated) return setModal('login')
+    const updated = { ...task, done: change === 'done' || task.done, assignee: change === 'assign' ? current.callsign : task.assignee, assigneeId: change === 'assign' ? String(current.id) : task.assigneeId }
+    if (online && typeof task.id === 'string') {
+      try { await apiPatch(`/tasks/${task.id}`, change === 'done' ? { status: 'DONE' } : { status: 'IN_PROGRESS', assigneeId: current.id }) }
+      catch (error) { return notify(error instanceof Error ? error.message : 'Не удалось сохранить задачу') }
+    }
+    setTasks(tasks.map(t => t.id === task.id ? updated : t)); notify(change === 'done' ? 'Задача выполнена' : `Задача назначена: ${current.callsign}`)
+  }
+
   return <div className="app-shell">
     <aside className="sidebar">
       <div className="brand"><div className="brand-eye">◉</div><div><small>PRIVATE</small><b>BLACKWOOD</b><span>DETECTIVE BUREAU</span></div></div>
@@ -142,10 +162,11 @@ function App() {
     <main>
       <header><div className="crumbs">АРХИВ <span>/</span> {selected ? `ДЕЛО #${selected.id}` : nav.find(n => n.id === section)?.label.toUpperCase()}</div><div className="header-tools"><label className="search">⌕<input value={search} onChange={e => setSearch(e.target.value)} placeholder="Поиск по архиву…" /></label><span className="date">19 ОКТ 2026<br/><small>03:47 · LOS SANTOS</small></span><button className="bell">♢<i/></button></div></header>
       <section className="workspace">
-        {section === 'cases' && (selected ? <CaseBoard file={selected} onBack={() => setSelected(null)} onReport={saveReport} /> : <CasesPage items={visibleCases} filter={filter} setFilter={setFilter} onSelect={setSelected} onAdd={() => setModal('case')} />)}
+        {online && !authenticated && <div className="auth-warning">СЕРВЕР ДОСТУПЕН · Для сохранения в общей базе необходимо войти <button onClick={() => setModal('login')}>ВОЙТИ</button></div>}
+        {section === 'cases' && (selected ? <CaseBoard file={selected} onBack={() => setSelected(null)} onReport={saveReport} onLayout={saveLayout} /> : <CasesPage items={visibleCases} filter={filter} setFilter={setFilter} onSelect={setSelected} onAdd={() => authenticated || !online ? setModal('case') : setModal('login')} />)}
         {section === 'informants' && <InformantsPage onAdd={() => notify('Карточка информатора подготовлена')} />}
         {section === 'intel' && <IntelPage />}
-        {section === 'tasks' && <TasksPage tasks={tasks} setTasks={setTasks} current={current} onAdd={() => setModal('task')} notify={notify} />}
+        {section === 'tasks' && <TasksPage tasks={tasks} current={current} onAdd={() => authenticated || !online ? setModal('task') : setModal('login')} updateTask={updateTask} />}
       </section>
     </main>
     {modal && <div className="modal-backdrop" onMouseDown={() => setModal(null)}><div className="modal" onMouseDown={e => e.stopPropagation()}><button className="modal-x" onClick={() => setModal(null)}>×</button>{modal === 'profile' && <ProfileForm submit={createProfile}/>} {modal === 'login' && <LoginForm submit={login}/>} {modal === 'case' && <CaseForm submit={createCase} people={people}/>} {modal === 'task' && <TaskForm submit={createTask}/>}</div></div>}
@@ -160,16 +181,31 @@ function CasesPage({ items, filter, setFilter, onSelect, onAdd }: { items: CaseF
   return <><PageHead eyebrow="ДОСЬЕ И РАССЛЕДОВАНИЯ" title="Дела" action={onAdd} actionText="＋  ЗАВЕСТИ ДЕЛО"/><div className="stats"><div><small>АКТИВНЫХ ДЕЛ</small><b>{String(items.filter(x => x.status === 'Активно').length).padStart(2,'0')}</b><span>↑ 2 за неделю</span></div><div><small>ОЖИДАЮТ ДАННЫХ</small><b>{String(items.filter(x => x.status === 'Ожидает').length).padStart(2,'0')}</b><span className="amber">Требуют внимания</span></div><div><small>ЗАКРЫТО ЗА МЕСЯЦ</small><b>12</b><span>↑ 18% к сентябрю</span></div><div className="quote">«У каждого города есть свои секреты.<br/>Наша работа — заставить их говорить.»<small>— АРХИВ БЮРО, 1987</small></div></div><div className="tabs">{(['Все','Активно','Ожидает','Закрыто'] as const).map(x => <button className={filter === x ? 'active' : ''} onClick={() => setFilter(x)} key={x}>{x.toUpperCase()} <span>{counts(x)}</span></button>)}</div><div className="case-grid">{items.map((c, i) => <article className="case-folder" key={c.id} onClick={() => onSelect(c)} style={{ '--tilt': `${i % 2 ? 0.35 : -0.2}deg` } as React.CSSProperties}><div className="folder-tab">ДЕЛО № {c.id}</div><div className="folder-paper"><div className="case-top"><span className={`stamp ${c.status}`}>{c.status}</span><small>{c.created}</small></div><h2>{c.title}</h2><p>{c.summary}</p><div className="case-location">⌖ {c.location}</div><div className="case-bottom"><div className="avatars">{[c.lead,...c.members].slice(0,3).map(x => <span key={x}>{x.slice(0,1)}</span>)}</div><span>ВЕДУЩИЙ: <b>{c.lead}</b></span><em className={`priority p-${c.priority}`}>{c.priority}</em></div></div></article>)}</div></>
 }
 
-function CaseBoard({ file, onBack, onReport }: { file: CaseFile; onBack: () => void; onReport: (v: string) => void }) { return <><button className="back" onClick={onBack}>← НАЗАД К ДЕЛАМ</button><div className="case-title"><div><small>ДЕЛО № {file.id} · {file.created}</small><h1>{file.title}</h1><p>ВЕДУЩИЙ: <b>{file.lead}</b> · <span>{file.priority.toUpperCase()} ПРИОРИТЕТ</span></p></div><button className="secondary" onClick={() => window.print()}>▣ ПЕЧАТЬ ДОСЬЕ</button></div><div className="evidence-board"><svg className="threads" viewBox="0 0 1200 700" preserveAspectRatio="none"><path d="M215 190 L580 105 L955 200 L850 490 L420 530 L215 190 M580 105 L420 530 M955 200 L420 530"/><circle cx="215" cy="190" r="5"/><circle cx="580" cy="105" r="5"/><circle cx="955" cy="200" r="5"/></svg><Note cls="main-note" pin="red" title="СВОДКА" lines={[file.summary, `МЕСТО: ${file.location}`]}/><ListNote cls="suspects-note" title="ПОДОЗРЕВАЕМЫЕ" items={file.suspects}/><ListNote cls="evidence-note" title="УЛИКИ" items={file.evidence}/><ListNote cls="witness-note" title="СВИДЕТЕЛИ / ЖЕРТВЫ" items={[...file.witnesses, ...file.victims]}/><ListNote cls="theory-note" title="ВЕРСИИ" items={file.theories}/><div className="photo-note"><div className="night-photo"><span>LOS SANTOS<br/><b>{file.location}</b></span></div><small>СНИМОК С МЕСТА · ПЛЁНКА 04</small></div></div><div className="report-box"><div><small>ОТЧЁТ ПО ДЕЛУ</small><h3>Рабочие заметки детектива</h3></div><textarea value={file.report} onChange={e => onReport(e.target.value)} placeholder="Зафиксируйте ход расследования, результаты опросов и ссылки на материалы…"/><div className="report-foot"><span>Сохраняется автоматически</span><input placeholder="Ссылка на презентацию / отчёт" defaultValue={file.report?.startsWith('http') ? file.report : ''}/></div></div></> }
+function CaseBoard({ file, onBack, onReport, onLayout }: { file: CaseFile; onBack: () => void; onReport: (v: string) => void; onLayout: (v: Record<string, {x:number;y:number}>) => void }) {
+  const board = useRef<HTMLDivElement>(null)
+  const defaults: Record<string,{x:number;y:number}> = { summary:{x:5,y:8}, suspects:{x:43,y:5}, evidence:{x:72,y:17}, witnesses:{x:11,y:66}, theories:{x:48,y:67}, photo:{x:76,y:66} }
+  const [layout,setLayout] = useState({...defaults,...file.boardLayout})
+  const drag = (key:string) => (event: React.PointerEvent<HTMLElement>) => {
+    if (!board.current) return
+    event.currentTarget.setPointerCapture(event.pointerId)
+    const rect = board.current.getBoundingClientRect(); const target = event.currentTarget
+    const move = (e:PointerEvent) => { const x=Math.max(0,Math.min(84,((e.clientX-rect.left-target.offsetWidth/2)/rect.width)*100)); const y=Math.max(0,Math.min(82,((e.clientY-rect.top-20)/rect.height)*100)); setLayout(v=>({...v,[key]:{x,y}})) }
+    const up = (e:PointerEvent) => { target.releasePointerCapture(e.pointerId); target.removeEventListener('pointermove',move); target.removeEventListener('pointerup',up); setLayout(v=>{onLayout(v);return v}) }
+    target.addEventListener('pointermove',move); target.addEventListener('pointerup',up)
+  }
+  const pos=(key:string)=>({left:`${layout[key].x}%`,top:`${layout[key].y}%`,right:'auto',bottom:'auto'})
+  return <><button className="back" onClick={onBack}>← НАЗАД К ДЕЛАМ</button><div className="case-title"><div><small>ДЕЛО № {file.id} · {file.created}</small><h1>{file.title}</h1><p>ВЕДУЩИЙ: <b>{file.lead}</b> · <span>{file.priority.toUpperCase()} ПРИОРИТЕТ</span></p></div><button className="secondary" onClick={() => window.print()}>▣ ПЕЧАТЬ ДОСЬЕ</button></div><div className="board-tip">ПЕРЕТАСКИВАЙТЕ КАРТОЧКИ ПО ДОСКЕ — ПОЛОЖЕНИЕ СОХРАНЯЕТСЯ</div><div className="evidence-board" ref={board}><svg className="threads" viewBox="0 0 1200 700" preserveAspectRatio="none"><path d="M215 190 L580 105 L955 200 L850 490 L420 530 L215 190 M580 105 L420 530 M955 200 L420 530"/></svg><Note cls="main-note" style={pos('summary')} onPointerDown={drag('summary')} title="СВОДКА" lines={[file.summary, `МЕСТО: ${file.location}`]}/><ListNote cls="suspects-note" style={pos('suspects')} onPointerDown={drag('suspects')} title="ПОДОЗРЕВАЕМЫЕ" items={file.suspects}/><ListNote cls="evidence-note" style={pos('evidence')} onPointerDown={drag('evidence')} title="УЛИКИ" items={file.evidence}/><ListNote cls="witness-note" style={pos('witnesses')} onPointerDown={drag('witnesses')} title="СВИДЕТЕЛИ / ЖЕРТВЫ" items={[...file.witnesses,...file.victims]}/><ListNote cls="theory-note" style={pos('theories')} onPointerDown={drag('theories')} title="ВЕРСИИ" items={file.theories}/><div className="photo-note draggable" style={pos('photo')} onPointerDown={drag('photo')}><div className="night-photo"><span>LOS SANTOS<br/><b>{file.location}</b></span></div><small>СНИМОК С МЕСТА · ПЛЁНКА 04</small></div></div><div className="report-box"><div><small>ОТЧЁТ ПО ДЕЛУ</small><h3>Рабочие заметки детектива</h3></div><textarea value={file.report} onChange={e => onReport(e.target.value)} placeholder="Зафиксируйте ход расследования, результаты опросов и ссылки на материалы…"/><div className="report-foot"><span>Сохраняется автоматически</span><input placeholder="Ссылка на презентацию / отчёт"/></div></div></>
+}
 
-function Note({ cls, title, lines }: { cls: string; pin?: string; title: string; lines: string[] }) { return <div className={`board-note ${cls}`}><i/><h3>{title}</h3>{lines.map((x,i) => <p key={i}>{x}</p>)}</div> }
-function ListNote({ cls, title, items }: { cls: string; title: string; items: string[] }) { return <div className={`board-note ${cls}`}><i/><h3>{title}</h3>{items.length ? <ul>{items.map(x => <li key={x}>{x}</li>)}</ul> : <button>＋ ДОБАВИТЬ</button>}</div> }
+type DragProps={cls:string;style:React.CSSProperties;onPointerDown:(e:React.PointerEvent<HTMLElement>)=>void}
+function Note({ cls, title, lines, style, onPointerDown }: DragProps & { title: string; lines: string[] }) { return <div className={`board-note draggable ${cls}`} style={style} onPointerDown={onPointerDown}><i/><h3>{title}</h3>{lines.map((x,i) => <p key={i}>{x}</p>)}</div> }
+function ListNote({ cls, title, items, style, onPointerDown }: DragProps & { title: string; items: string[] }) { return <div className={`board-note draggable ${cls}`} style={style} onPointerDown={onPointerDown}><i/><h3>{title}</h3>{items.length ? <ul>{items.map(x => <li key={x}>{x}</li>)}</ul> : <button>＋ ДОБАВИТЬ</button>}</div> }
 
 function InformantsPage({ onAdd }: { onAdd: () => void }) { return <><PageHead eyebrow="КОНФИДЕНЦИАЛЬНЫЕ ИСТОЧНИКИ" title="Информаторы" action={onAdd} actionText="＋  НОВЫЙ КОНТАКТ"/><div className="warning-strip">⚠ ДОСТУП ОГРАНИЧЕН <span>Разглашение личности источника карается исключением из бюро</span></div><div className="informant-grid">{informants.map((x,i) => <article className="informant" key={x.alias}><div className="portrait">{['♟','♞','♜'][i]}<span>ЛИЧНОСТЬ СКРЫТА</span></div><div className="clip"/><small>КОДОВОЕ ИМЯ</small><h2>«{x.alias}»</h2><p>{x.note}</p><dl><div><dt>РАЙОН</dt><dd>{x.area}</dd></div><div><dt>НАДЁЖНОСТЬ</dt><dd>{x.reliability}% <i style={{width:`${x.reliability}%`}}/></dd></div><div><dt>ПОСЛЕДНИЙ КОНТАКТ</dt><dd>{x.last}</dd></div></dl><span className={`contact ${x.status === 'ЗАТИХ' ? 'quiet':''}`}>● {x.status}</span></article>)}</div></> }
 
 function IntelPage() { return <><PageHead eyebrow="КРИМИНАЛЬНАЯ КАРТА ЛОС-САНТОСА" title="Оперативные данные"/><div className="intel-layout"><div className="map-panel"><div className="map-grid"/><span className="district d1">●<b>MARABUNTA</b></span><span className="district d2">●<b>FAMILIES</b></span><span className="district d3">●<b>THE LOST</b></span><div className="map-caption">КАРТА ВЛИЯНИЯ · ОБНОВЛЕНО 18.10.26</div></div><div className="gang-list">{gangs.map(g => <article key={g.name}><i style={{background:g.color}}/><div><small>{g.zone}</small><h3>{g.name}</h3><p>{g.note}</p></div><dl><dt>УГРОЗА</dt><dd>{g.threat}</dd><dt>ЧЛЕНОВ</dt><dd>{g.members}</dd></dl></article>)}</div></div></> }
 
-function TasksPage({ tasks, setTasks, current, onAdd, notify }: { tasks: Task[]; setTasks: (t: Task[]) => void; current: Person; onAdd: () => void; notify: (s:string)=>void }) { return <><PageHead eyebrow="ОПЕРАТИВНАЯ РАБОТА" title="Активные задачи" action={onAdd} actionText="＋  ПОСТАВИТЬ ЗАДАЧУ"/><div className="task-board"><section><h3>К ВЫПОЛНЕНИЮ <span>{tasks.filter(t=>!t.done).length}</span></h3>{tasks.filter(t=>!t.done).map(t => <article className="task" key={t.id}><button className="check" onClick={() => {setTasks(tasks.map(x=>x.id===t.id?{...x,done:true}:x));notify('Задача выполнена')}}/><div><small>{t.tag}</small><h4>{t.title}</h4><p>СРОК: <b>{t.due}</b></p></div>{t.assignee ? <span className="assigned">{t.assignee.slice(0,1)}<i>{t.assignee}</i></span> : <button className="take" onClick={()=>setTasks(tasks.map(x=>x.id===t.id?{...x,assignee:current.callsign}:x))}>ВЗЯТЬ</button>}</article>)}</section><section className="done"><h3>ВЫПОЛНЕНО <span>{tasks.filter(t=>t.done).length}</span></h3>{tasks.filter(t=>t.done).map(t => <article className="task" key={t.id}><button className="check checked">✓</button><div><small>{t.tag}</small><h4>{t.title}</h4><p>{t.report || 'Выполнено. Отчёт ожидает проверки.'}</p></div><span className="assigned">{(t.assignee||'—').slice(0,1)}<i>{t.assignee}</i></span></article>)}</section></div></> }
+function TasksPage({ tasks, current, onAdd, updateTask }: { tasks: Task[]; current: Person; onAdd: () => void; updateTask:(t:Task,c:'assign'|'done')=>void }) { return <><PageHead eyebrow="ОПЕРАТИВНАЯ РАБОТА" title="Активные задачи" action={onAdd} actionText="＋  ПОСТАВИТЬ ЗАДАЧУ"/><div className="task-board"><section><h3>К ВЫПОЛНЕНИЮ <span>{tasks.filter(t=>!t.done).length}</span></h3>{tasks.filter(t=>!t.done).map(t => <article className="task" key={t.id}><button className="check" onClick={() => updateTask(t,'done')}/><div><small>{t.tag}</small><h4>{t.title}</h4><p>СРОК: <b>{t.due}</b></p></div>{t.assignee ? <span className="assigned">{t.assignee.slice(0,1)}<i>{t.assignee}</i></span> : <button className="take" onClick={()=>updateTask(t,'assign')}>ВЗЯТЬ</button>}</article>)}</section><section className="done"><h3>ВЫПОЛНЕНО <span>{tasks.filter(t=>t.done).length}</span></h3>{tasks.filter(t=>t.done).map(t => <article className="task" key={t.id}><button className="check checked">✓</button><div><small>{t.tag}</small><h4>{t.title}</h4><p>{t.report || 'Выполнено. Отчёт ожидает проверки.'}</p></div><span className="assigned">{(t.assignee||current.callsign).slice(0,1)}<i>{t.assignee}</i></span></article>)}</section></div></> }
 
 function ProfileForm({ submit }: { submit: (e: FormEvent<HTMLFormElement>) => void }) { return <form onSubmit={submit}><small className="form-kicker">ЛИЧНОЕ ДЕЛО ОПЕРАТИВНИКА</small><h2>Новый профиль</h2><p className="form-desc">Введите данные сотрудника. Для допуска потребуется секретный код бюро.</p><label>ИМЯ И ФАМИЛИЯ<input name="name" required placeholder="Джозеф Блейк"/></label><label>ПОЗЫВНОЙ<input name="callsign" required placeholder="Ворон"/></label><label>СЕКРЕТНЫЙ КОД<input name="code" required type="password" placeholder="•••••••"/></label><p className="hint">Для демонстрации: <b>NOIR-47</b></p><button className="primary wide">СОЗДАТЬ ПРОФИЛЬ</button></form> }
 function LoginForm({ submit }: { submit: (e: FormEvent<HTMLFormElement>) => void }) { return <form onSubmit={submit}><small className="form-kicker">ЗАКРЫТЫЙ КОНТУР BLACKWOOD</small><h2>Вход в архив</h2><p className="form-desc">Предъявите позывной и выданный бюро секретный код.</p><label>ПОЗЫВНОЙ<input name="callsign" required autoFocus placeholder="Ворон"/></label><label>СЕКРЕТНЫЙ КОД<input name="code" required type="password" placeholder="•••••••"/></label><button className="primary wide">ПОЛУЧИТЬ ДОСТУП</button></form> }

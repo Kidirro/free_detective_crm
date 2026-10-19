@@ -21,7 +21,7 @@ async function issueSession(userId: string, reply: any) {
   const token = crypto.randomBytes(32).toString('hex')
   const expiresAt = new Date(Date.now() + SESSION_DAYS * 86400000)
   await prisma.session.create({ data: { userId, tokenHash: hashToken(token), expiresAt } })
-  reply.setCookie(SESSION_COOKIE, token, { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production', path: '/', expires: expiresAt })
+  reply.setCookie(SESSION_COOKIE, token, { httpOnly: true, sameSite: 'lax', secure: process.env.COOKIE_SECURE === 'true', path: '/', expires: expiresAt })
 }
 
 async function authenticate(request: any, reply: any) {
@@ -90,6 +90,7 @@ async function start() {
     const b = request.body as any; const data: any = {}
     for (const key of ['title','summary','location','report','reportUrl']) if (typeof b[key] === 'string') data[key] = b[key]
     for (const key of ['memberIds','suspects','victims','witnesses','evidence','theories','folders']) if (Array.isArray(b[key])) data[key] = b[key]
+    if (b.boardLayout && typeof b.boardLayout === 'object' && !Array.isArray(b.boardLayout)) data.boardLayout = b.boardLayout
     if (b.status && Object.values(CaseStatus).includes(b.status)) data.status = b.status
     if (b.priority && Object.values(Priority).includes(b.priority)) data.priority = b.priority
     if (b.leadId) data.leadId = b.leadId

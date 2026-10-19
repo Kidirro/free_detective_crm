@@ -54,6 +54,8 @@ model Case {
   theories Json @default("[]")
   folders Json @default("[]")
   boardLayout Json @default("{}")
+  boardCards Json @default("[]")
+  boardLinks Json @default("[]")
   report String @default("") @db.Text
   reportUrl String?
   lead User @relation("CaseLead", fields: [leadId], references: [id])
@@ -90,6 +92,8 @@ model Informant {
   id String @id @default(cuid())
   alias String @unique
   realName String?
+  regCode String?
+  photoUrl String?
   reliability Int @default(50)
   area String
   status String @default("ACTIVE")

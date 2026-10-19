@@ -101,6 +101,8 @@ async function start() {
     for (const key of ['title','summary','location','report','reportUrl']) if (typeof b[key] === 'string') data[key] = b[key]
     for (const key of ['memberIds','suspects','victims','witnesses','evidence','theories','folders']) if (Array.isArray(b[key])) data[key] = b[key]
     if (b.boardLayout && typeof b.boardLayout === 'object' && !Array.isArray(b.boardLayout)) data.boardLayout = b.boardLayout
+    if (Array.isArray(b.boardCards)) data.boardCards = b.boardCards
+    if (Array.isArray(b.boardLinks)) data.boardLinks = b.boardLinks
     if (b.status && Object.values(CaseStatus).includes(b.status)) data.status = b.status
     if (b.priority && Object.values(Priority).includes(b.priority)) data.priority = b.priority
     if (b.leadId) data.leadId = b.leadId
@@ -128,11 +130,11 @@ async function start() {
   app.post('/api/informants', { preHandler: authenticate }, async (request, reply) => {
     const b = request.body as any
     if (!b?.alias || !b?.area || !b?.specialties) return reply.code(400).send({ error: 'Позывной, район и специализация обязательны' })
-    return reply.code(201).send(await prisma.informant.create({ data: { alias: b.alias, realName: b.realName || null, area: b.area, specialties: b.specialties, reliability: Math.max(0, Math.min(100, Number(b.reliability) || 50)), notes: b.notes || '' } }))
+    return reply.code(201).send(await prisma.informant.create({ data: { alias: b.alias, realName: b.realName || null, regCode: b.regCode || null, photoUrl: b.photoUrl || null, area: b.area, specialties: b.specialties, reliability: Math.max(0, Math.min(100, Number(b.reliability) || 50)), notes: b.notes || '' } }))
   })
   app.patch('/api/informants/:id', { preHandler: authenticate }, async (request, reply) => {
     const b = request.body as any; const data: any = {}
-    for (const key of ['alias','realName','area','status','specialties','notes']) if (typeof b[key] === 'string') data[key] = b[key]
+    for (const key of ['alias','realName','regCode','photoUrl','area','status','specialties','notes']) if (typeof b[key] === 'string') data[key] = b[key]
     if (b.reliability !== undefined) data.reliability = Math.max(0, Math.min(100, Number(b.reliability) || 0))
     try { return await prisma.informant.update({ where: { id: (request.params as any).id }, data }) }
     catch (e: any) { if (e?.code === 'P2025') return reply.code(404).send({ error: 'Информатор не найден' }); throw e }

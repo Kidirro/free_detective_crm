@@ -44,14 +44,14 @@ async function start() {
 
   app.get('/api/health', async () => { await prisma.$queryRaw`SELECT 1`; return { status: 'ok', database: 'connected' } })
 
-  app.post('/api/auth/register', async (request, reply) => {
+  app.post('/api/auth/register', { preHandler: authenticate }, async (request, reply) => {
     const body = request.body as any
-    if (!body?.name?.trim() || !body?.callsign?.trim() || !body?.secretCode) return reply.code(400).send({ error: 'Заполните имя, позывной и секретный код' })
-    if (!process.env.INVITE_CODE || body.secretCode !== process.env.INVITE_CODE) return reply.code(403).send({ error: 'Секретный код не принят' })
+    const auth = (request as AuthedRequest).authUser!
+    if (auth.role !== 'MASTER') return reply.code(403).send({ error: 'Создавать профили может только MASTER' })
+    if (!body?.name?.trim() || !body?.callsign?.trim() || !body?.personalCode || String(body.personalCode).length < 6) return reply.code(400).send({ error: 'Заполните данные и задайте личный код не короче 6 символов' })
     const [firstName, ...rest] = body.name.trim().split(/\s+/)
     try {
-      const user = await prisma.user.create({ data: { firstName, lastName: rest.join(' ') || '—', callsign: body.callsign.trim(), password: await bcrypt.hash(body.secretCode, 12) } })
-      await issueSession(user.id, reply)
+      const user = await prisma.user.create({ data: { firstName, lastName: rest.join(' ') || '—', callsign: body.callsign.trim(), password: await bcrypt.hash(body.personalCode, 12) } })
       return reply.code(201).send(publicUser(user))
     } catch (error: any) {
       if (error?.code === 'P2002') return reply.code(409).send({ error: 'Такой позывной уже занят' })
@@ -74,6 +74,16 @@ async function start() {
   })
   app.get('/api/auth/me', { preHandler: authenticate }, async request => (request as AuthedRequest).authUser)
   app.get('/api/users', { preHandler: authenticate }, async () => (await prisma.user.findMany({ where: { status: 'ACTIVE' }, orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }] })).map(publicUser))
+  app.patch('/api/users/:id/code', { preHandler: authenticate }, async (request, reply) => {
+    const auth = (request as AuthedRequest).authUser!; const body = request.body as any
+    if (auth.role !== 'MASTER') return reply.code(403).send({ error: 'Менять коды может только MASTER' })
+    if (!body?.personalCode || String(body.personalCode).length < 6) return reply.code(400).send({ error: 'Код должен содержать не менее 6 символов' })
+    try {
+      await prisma.user.update({ where: { id: (request.params as any).id }, data: { password: await bcrypt.hash(String(body.personalCode), 12) } })
+      await prisma.session.deleteMany({ where: { userId: (request.params as any).id } })
+      return { ok: true }
+    } catch (e: any) { if (e?.code === 'P2025') return reply.code(404).send({ error: 'Профиль не найден' }); throw e }
+  })
 
   app.get('/api/cases', { preHandler: authenticate }, async () => prisma.case.findMany({ include: caseInclude, orderBy: { createdAt: 'desc' } }))
   app.post('/api/cases', { preHandler: authenticate }, async (request, reply) => {
@@ -98,17 +108,18 @@ async function start() {
     catch (e: any) { if (e?.code === 'P2025') return reply.code(404).send({ error: 'Дело не найдено' }); throw e }
   })
 
-  app.get('/api/tasks', { preHandler: authenticate }, async () => prisma.task.findMany({ include: { assignee: { select: { id: true, callsign: true } } }, orderBy: { createdAt: 'desc' } }))
+  app.get('/api/tasks', { preHandler: authenticate }, async () => prisma.task.findMany({ include: { assignee: { select: { id: true, callsign: true } }, case: { select: { id: true, number: true, title: true } } }, orderBy: { createdAt: 'desc' } }))
   app.post('/api/tasks', { preHandler: authenticate }, async (request, reply) => {
     const b = request.body as any; const auth = (request as AuthedRequest).authUser!
     if (!b?.title?.trim()) return reply.code(400).send({ error: 'Описание задачи обязательно' })
-    return reply.code(201).send(await prisma.task.create({ data: { title: b.title.trim(), tag: b.tag?.trim() || 'ОБЩЕЕ', dueLabel: b.dueLabel?.trim() || null, createdById: auth.id } }))
+    return reply.code(201).send(await prisma.task.create({ data: { title: b.title.trim(), tag: b.tag?.trim() || 'ОБЩЕЕ', dueLabel: b.dueLabel?.trim() || null, caseId: b.caseId || null, createdById: auth.id }, include: { case: true } }))
   })
   app.patch('/api/tasks/:id', { preHandler: authenticate }, async (request, reply) => {
     const b = request.body as any; const data: any = {}
     for (const key of ['title','tag','dueLabel','report']) if (typeof b[key] === 'string') data[key] = b[key]
     if (b.status && Object.values(TaskStatus).includes(b.status)) data.status = b.status
     if (b.assigneeId === null || typeof b.assigneeId === 'string') data.assigneeId = b.assigneeId
+    if (b.caseId === null || typeof b.caseId === 'string') data.caseId = b.caseId
     try { return await prisma.task.update({ where: { id: (request.params as any).id }, data, include: { assignee: true } }) }
     catch (e: any) { if (e?.code === 'P2025') return reply.code(404).send({ error: 'Задача не найдена' }); throw e }
   })
@@ -118,6 +129,13 @@ async function start() {
     const b = request.body as any
     if (!b?.alias || !b?.area || !b?.specialties) return reply.code(400).send({ error: 'Позывной, район и специализация обязательны' })
     return reply.code(201).send(await prisma.informant.create({ data: { alias: b.alias, realName: b.realName || null, area: b.area, specialties: b.specialties, reliability: Math.max(0, Math.min(100, Number(b.reliability) || 50)), notes: b.notes || '' } }))
+  })
+  app.patch('/api/informants/:id', { preHandler: authenticate }, async (request, reply) => {
+    const b = request.body as any; const data: any = {}
+    for (const key of ['alias','realName','area','status','specialties','notes']) if (typeof b[key] === 'string') data[key] = b[key]
+    if (b.reliability !== undefined) data.reliability = Math.max(0, Math.min(100, Number(b.reliability) || 0))
+    try { return await prisma.informant.update({ where: { id: (request.params as any).id }, data }) }
+    catch (e: any) { if (e?.code === 'P2025') return reply.code(404).send({ error: 'Информатор не найден' }); throw e }
   })
   app.get('/api/organizations', { preHandler: authenticate }, async () => prisma.organization.findMany({ orderBy: { name: 'asc' } }))
   app.post('/api/organizations', { preHandler: authenticate }, async (request, reply) => {

@@ -1,0 +1,3 @@
+ALTER TABLE "Task" ADD COLUMN "caseId" TEXT;
+CREATE INDEX "Task_caseId_idx" ON "Task"("caseId");
+ALTER TABLE "Task" ADD CONSTRAINT "Task_caseId_fkey" FOREIGN KEY ("caseId") REFERENCES "Case"("id") ON DELETE SET NULL ON UPDATE CASCADE;

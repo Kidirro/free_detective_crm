@@ -5,14 +5,16 @@ import { api, patch as apiPatch, post } from './api'
 
 type Section = 'cases' | 'informants' | 'intel' | 'tasks'
 type CaseStatus = 'Активно' | 'Ожидает' | 'Закрыто'
-type Person = { id: number | string; name: string; callsign: string; initials: string }
+type Person = { id: number | string; name: string; callsign: string; initials: string; role?: string }
 type CaseFile = {
   id: string; dbId?: string; title: string; status: CaseStatus; priority: 'Критический' | 'Высокий' | 'Средний' | 'Низкий'
   lead: string; members: string[]; created: string; summary: string; location: string
   suspects: string[]; victims: string[]; witnesses: string[]; evidence: string[]; theories: string[]; report?: string
   boardLayout?: Record<string, { x: number; y: number }>
 }
-type Task = { id: number | string; title: string; due: string; assignee?: string; assigneeId?: string; done: boolean; report?: string; tag: string }
+type Task = { id: number | string; title: string; due: string; assignee?: string; assigneeId?: string; done: boolean; report?: string; tag: string; caseDbId?: string; caseNumber?: string }
+type Informant = { id: string; alias: string; reliability: number; area: string; status: string; note: string; last: string; notes?: string }
+type AspectKey = 'suspects'|'victims'|'witnesses'|'evidence'|'theories'
 
 const seedPeople: Person[] = [
   { id: 1, name: 'Джозеф Блейк', callsign: 'Ворон', initials: 'ДБ' },
@@ -63,32 +65,42 @@ function App() {
   const [user, setUser] = useStored<Person | null>('db_session', null)
   const [section, setSection] = useState<Section>('cases')
   const [selected, setSelected] = useState<CaseFile | null>(null)
-  const [modal, setModal] = useState<'profile' | 'login' | 'case' | 'task' | null>(null)
+  const [modal, setModal] = useState<'profile' | 'code' | 'login' | 'case' | 'task' | 'task-edit' | 'informant' | 'aspect' | null>(null)
   const [filter, setFilter] = useState<'Все' | CaseStatus>('Все')
   const [search, setSearch] = useState('')
   const [toast, setToast] = useState('')
   const [online, setOnline] = useState(false)
   const [authenticated, setAuthenticated] = useState(false)
+  const [authChecked, setAuthChecked] = useState(false)
+  const [informantItems, setInformantItems] = useState<Informant[]>(() => informants.map((x,i) => ({...x,id:`seed-${i}`})))
+  const [editingInformant, setEditingInformant] = useState<Informant | null>(null)
+  const [editingTask, setEditingTask] = useState<Task | null>(null)
+  const [aspect, setAspect] = useState<AspectKey | null>(null)
+  const [fullscreenBoard, setFullscreenBoard] = useState(false)
 
   const notify = (text: string) => { setToast(text); window.setTimeout(() => setToast(''), 2600) }
   const current = user || people[0]
   const visibleCases = useMemo(() => cases.filter(c => (filter === 'Все' || c.status === filter) && (c.title + c.id).toLowerCase().includes(search.toLowerCase())), [cases, filter, search])
+  useEffect(()=>{if(aspect)setModal('aspect')},[aspect])
+  useEffect(()=>{const handler=(e:Event)=>{const d=(e as CustomEvent).detail as {action:string;key:AspectKey;value?:string};if(d.action==='add')setAspect(d.key);else if(d.value)removeAspect(d.key,d.value)};window.addEventListener('case-aspect',handler);return()=>window.removeEventListener('case-aspect',handler)})
 
   useEffect(() => {
     async function loadServerData() {
       try {
         await api('/health'); setOnline(true)
         const me = await api<any>('/auth/me').catch(() => null)
-        if (!me) return
+        if (!me) { setAuthChecked(true); return }
         setAuthenticated(true)
-        const [remotePeople, remoteCases, remoteTasks] = await Promise.all([api<any[]>('/users'), api<any[]>('/cases'), api<any[]>('/tasks')])
-        const mappedPeople = remotePeople.map(p => ({ id: p.id, name: `${p.firstName} ${p.lastName}`, callsign: p.callsign, initials: `${p.firstName[0] || ''}${p.lastName[0] || ''}`.toUpperCase() }))
+        const [remotePeople, remoteCases, remoteTasks, remoteInformants] = await Promise.all([api<any[]>('/users'), api<any[]>('/cases'), api<any[]>('/tasks'), api<any[]>('/informants')])
+        const mappedPeople = remotePeople.map(p => ({ id: p.id, name: `${p.firstName} ${p.lastName}`, callsign: p.callsign, initials: `${p.firstName[0] || ''}${p.lastName[0] || ''}`.toUpperCase(), role:p.role }))
         const statuses: Record<string, CaseStatus> = { ACTIVE: 'Активно', WAITING: 'Ожидает', CLOSED: 'Закрыто' }
         const priorities: Record<string, CaseFile['priority']> = { CRITICAL: 'Критический', HIGH: 'Высокий', MEDIUM: 'Средний', LOW: 'Низкий' }
         setPeople(mappedPeople); setUser(mappedPeople.find(p => p.id === me.id) || mappedPeople[0])
         setCases(remoteCases.map(c => ({ id: String(c.number).padStart(4, '0'), dbId: c.id, title: c.title, status: statuses[c.status], priority: priorities[c.priority], lead: c.lead.callsign, members: [], created: new Date(c.createdAt).toLocaleDateString('ru-RU'), location: c.location || 'Не установлено', summary: c.summary, suspects: c.suspects, victims: c.victims, witnesses: c.witnesses, evidence: c.evidence, theories: c.theories, report: c.report || '', boardLayout: c.boardLayout || {} })))
-        setTasks(remoteTasks.map(t => ({ id: t.id, title: t.title, due: t.dueLabel || 'Без срока', tag: t.tag, done: t.status === 'DONE', report: t.report, assignee: t.assignee?.callsign, assigneeId: t.assigneeId })))
-      } catch { setOnline(false) }
+        setTasks(remoteTasks.map(t => ({ id: t.id, title: t.title, due: t.dueLabel || 'Без срока', tag: t.tag, done: t.status === 'DONE', report: t.report, assignee: t.assignee?.callsign, assigneeId: t.assigneeId, caseDbId:t.case?.id, caseNumber:t.case ? String(t.case.number).padStart(4,'0') : undefined })))
+        setInformantItems(remoteInformants.map(x => ({id:x.id,alias:x.alias,reliability:x.reliability,area:x.area,status:x.status==='ACTIVE'?'НА СВЯЗИ':x.status,note:x.specialties,last:x.lastContact?new Date(x.lastContact).toLocaleDateString('ru-RU'):'Нет контакта',notes:x.notes})))
+        setAuthChecked(true)
+      } catch { setOnline(false); setAuthChecked(true) }
     }
     void loadServerData()
   }, [])
@@ -97,17 +109,16 @@ function App() {
     e.preventDefault(); const fd = new FormData(e.currentTarget)
     const name = String(fd.get('name')); const callsign = String(fd.get('callsign'))
     let id: string | number = Date.now()
-    if (online) { try { id = (await post<any>('/auth/register', { name, callsign, secretCode: String(fd.get('code')) })).id } catch (error) { return notify(error instanceof Error ? error.message : 'Не удалось создать профиль') } }
-    else if (fd.get('code') !== 'NOIR-47') return notify('Секретный код не принят')
-    const p = { id, name, callsign, initials: name.split(' ').map(x => x[0]).join('').slice(0, 2).toUpperCase() }
-    setPeople([...people, p]); setUser(p); setAuthenticated(online); setModal(null); notify(`Профиль «${callsign}» создан`)
+    if (online) { try { id = (await post<any>('/auth/register', { name, callsign, personalCode: String(fd.get('code')) })).id } catch (error) { return notify(error instanceof Error ? error.message : 'Не удалось создать профиль') } }
+    const p = { id, name, callsign, initials: name.split(' ').map(x => x[0]).join('').slice(0, 2).toUpperCase(), role:'DETECTIVE' }
+    setPeople([...people, p]); setModal(null); notify(`Профиль «${callsign}» создан. Передайте сотруднику личный код.`)
   }
 
   async function login(e: FormEvent<HTMLFormElement>) {
     e.preventDefault(); const fd = new FormData(e.currentTarget)
     try {
       const remote = await post<any>('/auth/login', { callsign: String(fd.get('callsign')), secretCode: String(fd.get('code')) })
-      const p = { id: remote.id, name: `${remote.firstName} ${remote.lastName}`, callsign: remote.callsign, initials: `${remote.firstName[0] || ''}${remote.lastName[0] || ''}`.toUpperCase() }
+      const p = { id: remote.id, name: `${remote.firstName} ${remote.lastName}`, callsign: remote.callsign, initials: `${remote.firstName[0] || ''}${remote.lastName[0] || ''}`.toUpperCase(), role:remote.role }
       setUser(p); setAuthenticated(true); if (!people.some(x => x.id === p.id)) setPeople([...people, p]); setModal(null); notify(`Добро пожаловать, ${p.callsign}`); window.setTimeout(() => window.location.reload(), 400)
     } catch (error) { notify(error instanceof Error ? error.message : 'Не удалось войти') }
   }
@@ -122,8 +133,9 @@ function App() {
 
   async function createTask(e: FormEvent<HTMLFormElement>) {
     e.preventDefault(); const fd = new FormData(e.currentTarget)
-    const item: Task = { id: Date.now(), title: String(fd.get('title')), due: String(fd.get('due')), tag: String(fd.get('tag') || 'ОБЩЕЕ'), done: false }
-    if (online) { try { item.id=(await post<any>('/tasks', { title:item.title, dueLabel:item.due, tag:item.tag })).id } catch(error) { return notify(error instanceof Error ? error.message : 'Ошибка сервера') } }
+    const caseDbId=String(fd.get('caseId')||'') || undefined; const linked=cases.find(c=>c.dbId===caseDbId)
+    const item: Task = { id: Date.now(), title: String(fd.get('title')), due: String(fd.get('due')), tag: linked?`ДЕЛО #${linked.id}`:String(fd.get('tag') || 'ОБЩЕЕ'), done: false, caseDbId, caseNumber:linked?.id }
+    if (online) { try { const remote=await post<any>('/tasks', { title:item.title, dueLabel:item.due, tag:item.tag, caseId:caseDbId });item.id=remote.id } catch(error) { return notify(error instanceof Error ? error.message : 'Ошибка сервера') } }
     setTasks([item, ...tasks]); setModal(null); notify('Задача добавлена')
   }
 
@@ -149,12 +161,33 @@ function App() {
     setTasks(tasks.map(t => t.id === task.id ? updated : t)); notify(change === 'done' ? 'Задача выполнена' : `Задача назначена: ${current.callsign}`)
   }
 
+  async function saveTaskEdit(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault(); if(!editingTask)return; const fd=new FormData(e.currentTarget);const caseDbId=String(fd.get('caseId')||'')||undefined;const linked=cases.find(c=>c.dbId===caseDbId)
+    const updated={...editingTask,title:String(fd.get('title')),due:String(fd.get('due')),report:String(fd.get('report')||''),caseDbId,caseNumber:linked?.id,tag:linked?`ДЕЛО #${linked.id}`:String(fd.get('tag')||'ОБЩЕЕ')}
+    if(online&&typeof updated.id==='string')try{await apiPatch(`/tasks/${updated.id}`,{title:updated.title,dueLabel:updated.due,report:updated.report,tag:updated.tag,caseId:caseDbId||null})}catch(error){return notify(error instanceof Error?error.message:'Ошибка сохранения')}
+    setTasks(tasks.map(t=>t.id===updated.id?updated:t));setEditingTask(null);setModal(null);notify('Задача обновлена')
+  }
+  async function resetPersonalCode(e:FormEvent<HTMLFormElement>){e.preventDefault();const fd=new FormData(e.currentTarget);try{await apiPatch(`/users/${String(fd.get('userId'))}/code`,{personalCode:String(fd.get('code'))});setModal(null);notify('Личный код изменён. Старые сессии сотрудника закрыты.')}catch(error){notify(error instanceof Error?error.message:'Не удалось изменить код')}}
+
+  async function saveInformant(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();const fd=new FormData(e.currentTarget);const data={alias:String(fd.get('alias')),area:String(fd.get('area')),specialties:String(fd.get('note')),reliability:Number(fd.get('reliability')),status:String(fd.get('status')),notes:String(fd.get('notes')||'')}
+    try{if(editingInformant){const remote=await apiPatch<any>(`/informants/${editingInformant.id}`,data);setInformantItems(informantItems.map(x=>x.id===editingInformant.id?{...x,alias:remote.alias,area:remote.area,note:remote.specialties,reliability:remote.reliability,status:remote.status==='ACTIVE'?'НА СВЯЗИ':remote.status,notes:remote.notes}:x))}else{const remote=await post<any>('/informants',data);setInformantItems([{id:remote.id,alias:remote.alias,area:remote.area,note:remote.specialties,reliability:remote.reliability,status:'НА СВЯЗИ',last:'Только что',notes:remote.notes},...informantItems])}}catch(error){return notify(error instanceof Error?error.message:'Ошибка сохранения')}
+    setEditingInformant(null);setModal(null);notify('Карточка информатора сохранена')
+  }
+
+  function saveAspect(e:FormEvent<HTMLFormElement>){e.preventDefault();if(!selected||!aspect)return;const value=String(new FormData(e.currentTarget).get('value')).trim();if(!value)return;const updated={...selected,[aspect]:[...selected[aspect],value]};setSelected(updated);setCases(cases.map(c=>c.id===updated.id?updated:c));if(online&&updated.dbId)void apiPatch(`/cases/${updated.dbId}`,{[aspect]:updated[aspect]});setAspect(null);setModal(null)}
+  function removeAspect(key:AspectKey,value:string){if(!selected)return;const updated={...selected,[key]:selected[key].filter(x=>x!==value)};setSelected(updated);setCases(cases.map(c=>c.id===updated.id?updated:c));if(online&&updated.dbId)void apiPatch(`/cases/${updated.dbId}`,{[key]:updated[key]})}
+  function openCaseFromTask(task:Task){const file=cases.find(c=>c.dbId===task.caseDbId||c.id===task.caseNumber);if(file){setSection('cases');setSelected(file)}}
+
+  if (!authChecked) return <div className="auth-gate"><div className="auth-card"><div className="brand-eye">◉</div><h1>BLACKWOOD</h1><p>Проверка допуска к закрытому архиву…</p></div></div>
+  if (!authenticated) return <><AuthGate online={online} onLogin={()=>setModal('login')}/>{modal==='login'&&<div className="modal-backdrop"><div className="modal"><button className="modal-x" onClick={()=>setModal(null)}>×</button><LoginForm submit={login}/></div></div>}{toast&&<div className="toast">{toast}</div>}</>
+
   return <div className="app-shell">
     <aside className="sidebar">
       <div className="brand"><div className="brand-eye">◉</div><div><small>PRIVATE</small><b>BLACKWOOD</b><span>DETECTIVE BUREAU</span></div></div>
       <div className="side-label">КАРТОТЕКА</div>
       <nav>{nav.map(n => <button key={n.id} className={section === n.id ? 'active' : ''} onClick={() => { setSection(n.id); setSelected(null) }}><i>{n.mark}</i>{n.label}{n.id === 'tasks' && <em>{tasks.filter(t => !t.done).length}</em>}</button>)}</nav>
-      <div className="side-label operatives">ОПЕРАТИВНИКИ <button onClick={() => setModal('profile')}>＋</button></div>
+      <div className="side-label operatives">ОПЕРАТИВНИКИ {current.role==='MASTER'&&<span><button onClick={() => setModal('profile')} title="Новый детектив">＋</button><button onClick={()=>setModal('code')} title="Сменить личный код">⚿</button></span>}</div>
       <div className="people">{people.map(p => <button className={current.id === p.id ? 'person current' : 'person'} key={p.id} onClick={() => setUser(p)}><span>{p.initials}</span><div><b>{p.callsign}</b><small>{p.name}</small></div><i>●</i></button>)}</div>
       <div className="user-card"><span>{current.initials}</span><div><b>{current.callsign}</b><small>ДЕТЕКТИВ · {online ? 'СЕРВЕР' : 'ЛОКАЛЬНО'}</small></div><button onClick={() => setModal('login')} title="Сменить профиль">↪</button></div>
     </aside>
@@ -162,14 +195,13 @@ function App() {
     <main>
       <header><div className="crumbs">АРХИВ <span>/</span> {selected ? `ДЕЛО #${selected.id}` : nav.find(n => n.id === section)?.label.toUpperCase()}</div><div className="header-tools"><label className="search">⌕<input value={search} onChange={e => setSearch(e.target.value)} placeholder="Поиск по архиву…" /></label><span className="date">19 ОКТ 2026<br/><small>03:47 · LOS SANTOS</small></span><button className="bell">♢<i/></button></div></header>
       <section className="workspace">
-        {online && !authenticated && <div className="auth-warning">СЕРВЕР ДОСТУПЕН · Для сохранения в общей базе необходимо войти <button onClick={() => setModal('login')}>ВОЙТИ</button></div>}
-        {section === 'cases' && (selected ? <CaseBoard file={selected} onBack={() => setSelected(null)} onReport={saveReport} onLayout={saveLayout} /> : <CasesPage items={visibleCases} filter={filter} setFilter={setFilter} onSelect={setSelected} onAdd={() => authenticated || !online ? setModal('case') : setModal('login')} />)}
-        {section === 'informants' && <InformantsPage onAdd={() => notify('Карточка информатора подготовлена')} />}
+        {section === 'cases' && (selected ? <CaseBoard file={selected} onBack={() => setSelected(null)} onReport={saveReport} onLayout={saveLayout} onAspect={setAspect} onRemove={removeAspect} fullscreen={fullscreenBoard} setFullscreen={setFullscreenBoard} /> : <CasesPage items={visibleCases} filter={filter} setFilter={setFilter} onSelect={setSelected} onAdd={() => setModal('case')} />)}
+        {section === 'informants' && <InformantsManager items={informantItems} onAdd={() => {setEditingInformant(null);setModal('informant')}} onEdit={x=>{setEditingInformant(x);setModal('informant')}} />}
         {section === 'intel' && <IntelPage />}
-        {section === 'tasks' && <TasksPage tasks={tasks} current={current} onAdd={() => authenticated || !online ? setModal('task') : setModal('login')} updateTask={updateTask} />}
+        {section === 'tasks' && <TasksManager tasks={tasks} current={current} onAdd={() => {setEditingTask(null);setModal('task')}} updateTask={updateTask} onEdit={t=>{setEditingTask(t);setModal('task-edit')}} onOpenCase={openCaseFromTask} />}
       </section>
     </main>
-    {modal && <div className="modal-backdrop" onMouseDown={() => setModal(null)}><div className="modal" onMouseDown={e => e.stopPropagation()}><button className="modal-x" onClick={() => setModal(null)}>×</button>{modal === 'profile' && <ProfileForm submit={createProfile}/>} {modal === 'login' && <LoginForm submit={login}/>} {modal === 'case' && <CaseForm submit={createCase} people={people}/>} {modal === 'task' && <TaskForm submit={createTask}/>}</div></div>}
+    {modal && <div className="modal-backdrop" onMouseDown={() => setModal(null)}><div className="modal" onMouseDown={e => e.stopPropagation()}><button className="modal-x" onClick={() => setModal(null)}>×</button>{modal === 'profile' && <ProfileForm submit={createProfile}/>} {modal === 'code' && <CodeForm submit={resetPersonalCode} people={people}/>} {modal === 'login' && <LoginForm submit={login}/>} {modal === 'case' && <CaseForm submit={createCase} people={people}/>} {modal === 'task' && <TaskForm submit={createTask} cases={cases}/>} {modal==='task-edit'&&editingTask&&<TaskEditForm submit={saveTaskEdit} task={editingTask} cases={cases}/>} {modal==='informant'&&<InformantForm submit={saveInformant} item={editingInformant}/>} {modal==='aspect'&&aspect&&<AspectForm submit={saveAspect} aspect={aspect}/>}</div></div>}
     {toast && <div className="toast"><b>✓</b>{toast}</div>}
   </div>
 }
@@ -181,10 +213,11 @@ function CasesPage({ items, filter, setFilter, onSelect, onAdd }: { items: CaseF
   return <><PageHead eyebrow="ДОСЬЕ И РАССЛЕДОВАНИЯ" title="Дела" action={onAdd} actionText="＋  ЗАВЕСТИ ДЕЛО"/><div className="stats"><div><small>АКТИВНЫХ ДЕЛ</small><b>{String(items.filter(x => x.status === 'Активно').length).padStart(2,'0')}</b><span>↑ 2 за неделю</span></div><div><small>ОЖИДАЮТ ДАННЫХ</small><b>{String(items.filter(x => x.status === 'Ожидает').length).padStart(2,'0')}</b><span className="amber">Требуют внимания</span></div><div><small>ЗАКРЫТО ЗА МЕСЯЦ</small><b>12</b><span>↑ 18% к сентябрю</span></div><div className="quote">«У каждого города есть свои секреты.<br/>Наша работа — заставить их говорить.»<small>— АРХИВ БЮРО, 1987</small></div></div><div className="tabs">{(['Все','Активно','Ожидает','Закрыто'] as const).map(x => <button className={filter === x ? 'active' : ''} onClick={() => setFilter(x)} key={x}>{x.toUpperCase()} <span>{counts(x)}</span></button>)}</div><div className="case-grid">{items.map((c, i) => <article className="case-folder" key={c.id} onClick={() => onSelect(c)} style={{ '--tilt': `${i % 2 ? 0.35 : -0.2}deg` } as React.CSSProperties}><div className="folder-tab">ДЕЛО № {c.id}</div><div className="folder-paper"><div className="case-top"><span className={`stamp ${c.status}`}>{c.status}</span><small>{c.created}</small></div><h2>{c.title}</h2><p>{c.summary}</p><div className="case-location">⌖ {c.location}</div><div className="case-bottom"><div className="avatars">{[c.lead,...c.members].slice(0,3).map(x => <span key={x}>{x.slice(0,1)}</span>)}</div><span>ВЕДУЩИЙ: <b>{c.lead}</b></span><em className={`priority p-${c.priority}`}>{c.priority}</em></div></div></article>)}</div></>
 }
 
-function CaseBoard({ file, onBack, onReport, onLayout }: { file: CaseFile; onBack: () => void; onReport: (v: string) => void; onLayout: (v: Record<string, {x:number;y:number}>) => void }) {
+function CaseBoard({ file, onBack, onReport, onLayout }: { file: CaseFile; onBack: () => void; onReport: (v: string) => void; onLayout: (v: Record<string, {x:number;y:number}>) => void; onAspect:(k:AspectKey)=>void;onRemove:(k:AspectKey,v:string)=>void;fullscreen:boolean;setFullscreen:(v:boolean)=>void }) {
   const board = useRef<HTMLDivElement>(null)
   const defaults: Record<string,{x:number;y:number}> = { summary:{x:5,y:8}, suspects:{x:43,y:5}, evidence:{x:72,y:17}, witnesses:{x:11,y:66}, theories:{x:48,y:67}, photo:{x:76,y:66} }
   const [layout,setLayout] = useState({...defaults,...file.boardLayout})
+  useEffect(()=>{const el=board.current;if(!el)return;const open=()=>el.requestFullscreen?.();el.addEventListener('dblclick',open);return()=>el.removeEventListener('dblclick',open)},[])
   const drag = (key:string) => (event: React.PointerEvent<HTMLElement>) => {
     if (!board.current) return
     event.currentTarget.setPointerCapture(event.pointerId)
@@ -199,7 +232,7 @@ function CaseBoard({ file, onBack, onReport, onLayout }: { file: CaseFile; onBac
 
 type DragProps={cls:string;style:React.CSSProperties;onPointerDown:(e:React.PointerEvent<HTMLElement>)=>void}
 function Note({ cls, title, lines, style, onPointerDown }: DragProps & { title: string; lines: string[] }) { return <div className={`board-note draggable ${cls}`} style={style} onPointerDown={onPointerDown}><i/><h3>{title}</h3>{lines.map((x,i) => <p key={i}>{x}</p>)}</div> }
-function ListNote({ cls, title, items, style, onPointerDown }: DragProps & { title: string; items: string[] }) { return <div className={`board-note draggable ${cls}`} style={style} onPointerDown={onPointerDown}><i/><h3>{title}</h3>{items.length ? <ul>{items.map(x => <li key={x}>{x}</li>)}</ul> : <button>＋ ДОБАВИТЬ</button>}</div> }
+function ListNote({ cls, title, items, style, onPointerDown }: DragProps & { title: string; items: string[] }) { const keys:Record<string,AspectKey>={'suspects-note':'suspects','evidence-note':'evidence','witness-note':'witnesses','theory-note':'theories'};const key=keys[cls];const fire=(action:string,value?:string,customKey:AspectKey=key)=>window.dispatchEvent(new CustomEvent('case-aspect',{detail:{action,key:customKey,value}}));return <div className={`board-note draggable ${cls}`} style={style} onPointerDown={onPointerDown}><i/><h3>{title}</h3><ul>{items.map(x => <li key={x}>{x}<button className="item-remove" onPointerDown={e=>e.stopPropagation()} onClick={()=>fire('remove',x)}>×</button></li>)}</ul><button onPointerDown={e=>e.stopPropagation()} onClick={()=>fire('add')}>＋ ДОБАВИТЬ</button>{cls==='witness-note'&&<button onPointerDown={e=>e.stopPropagation()} onClick={()=>fire('add',undefined,'victims')}>＋ ЖЕРТВА</button>}</div> }
 
 function InformantsPage({ onAdd }: { onAdd: () => void }) { return <><PageHead eyebrow="КОНФИДЕНЦИАЛЬНЫЕ ИСТОЧНИКИ" title="Информаторы" action={onAdd} actionText="＋  НОВЫЙ КОНТАКТ"/><div className="warning-strip">⚠ ДОСТУП ОГРАНИЧЕН <span>Разглашение личности источника карается исключением из бюро</span></div><div className="informant-grid">{informants.map((x,i) => <article className="informant" key={x.alias}><div className="portrait">{['♟','♞','♜'][i]}<span>ЛИЧНОСТЬ СКРЫТА</span></div><div className="clip"/><small>КОДОВОЕ ИМЯ</small><h2>«{x.alias}»</h2><p>{x.note}</p><dl><div><dt>РАЙОН</dt><dd>{x.area}</dd></div><div><dt>НАДЁЖНОСТЬ</dt><dd>{x.reliability}% <i style={{width:`${x.reliability}%`}}/></dd></div><div><dt>ПОСЛЕДНИЙ КОНТАКТ</dt><dd>{x.last}</dd></div></dl><span className={`contact ${x.status === 'ЗАТИХ' ? 'quiet':''}`}>● {x.status}</span></article>)}</div></> }
 
@@ -207,9 +240,21 @@ function IntelPage() { return <><PageHead eyebrow="КРИМИНАЛЬНАЯ КА
 
 function TasksPage({ tasks, current, onAdd, updateTask }: { tasks: Task[]; current: Person; onAdd: () => void; updateTask:(t:Task,c:'assign'|'done')=>void }) { return <><PageHead eyebrow="ОПЕРАТИВНАЯ РАБОТА" title="Активные задачи" action={onAdd} actionText="＋  ПОСТАВИТЬ ЗАДАЧУ"/><div className="task-board"><section><h3>К ВЫПОЛНЕНИЮ <span>{tasks.filter(t=>!t.done).length}</span></h3>{tasks.filter(t=>!t.done).map(t => <article className="task" key={t.id}><button className="check" onClick={() => updateTask(t,'done')}/><div><small>{t.tag}</small><h4>{t.title}</h4><p>СРОК: <b>{t.due}</b></p></div>{t.assignee ? <span className="assigned">{t.assignee.slice(0,1)}<i>{t.assignee}</i></span> : <button className="take" onClick={()=>updateTask(t,'assign')}>ВЗЯТЬ</button>}</article>)}</section><section className="done"><h3>ВЫПОЛНЕНО <span>{tasks.filter(t=>t.done).length}</span></h3>{tasks.filter(t=>t.done).map(t => <article className="task" key={t.id}><button className="check checked">✓</button><div><small>{t.tag}</small><h4>{t.title}</h4><p>{t.report || 'Выполнено. Отчёт ожидает проверки.'}</p></div><span className="assigned">{(t.assignee||current.callsign).slice(0,1)}<i>{t.assignee}</i></span></article>)}</section></div></> }
 
-function ProfileForm({ submit }: { submit: (e: FormEvent<HTMLFormElement>) => void }) { return <form onSubmit={submit}><small className="form-kicker">ЛИЧНОЕ ДЕЛО ОПЕРАТИВНИКА</small><h2>Новый профиль</h2><p className="form-desc">Введите данные сотрудника. Для допуска потребуется секретный код бюро.</p><label>ИМЯ И ФАМИЛИЯ<input name="name" required placeholder="Джозеф Блейк"/></label><label>ПОЗЫВНОЙ<input name="callsign" required placeholder="Ворон"/></label><label>СЕКРЕТНЫЙ КОД<input name="code" required type="password" placeholder="•••••••"/></label><p className="hint">Для демонстрации: <b>NOIR-47</b></p><button className="primary wide">СОЗДАТЬ ПРОФИЛЬ</button></form> }
+function ProfileForm({ submit }: { submit: (e: FormEvent<HTMLFormElement>) => void }) { return <form onSubmit={submit}><small className="form-kicker">ЛИЧНОЕ ДЕЛО ОПЕРАТИВНИКА</small><h2>Новый профиль</h2><p className="form-desc">MASTER создаёт сотруднику отдельный личный код. Передайте его детективу безопасным способом.</p><label>ИМЯ И ФАМИЛИЯ<input name="name" required placeholder="Джозеф Блейк"/></label><label>ПОЗЫВНОЙ<input name="callsign" required placeholder="Ворон"/></label><label>ЛИЧНЫЙ КОД<input name="code" required minLength={6} type="password" placeholder="Не менее 6 символов"/></label><button className="primary wide">СОЗДАТЬ ПРОФИЛЬ</button></form> }
 function LoginForm({ submit }: { submit: (e: FormEvent<HTMLFormElement>) => void }) { return <form onSubmit={submit}><small className="form-kicker">ЗАКРЫТЫЙ КОНТУР BLACKWOOD</small><h2>Вход в архив</h2><p className="form-desc">Предъявите позывной и выданный бюро секретный код.</p><label>ПОЗЫВНОЙ<input name="callsign" required autoFocus placeholder="Ворон"/></label><label>СЕКРЕТНЫЙ КОД<input name="code" required type="password" placeholder="•••••••"/></label><button className="primary wide">ПОЛУЧИТЬ ДОСТУП</button></form> }
 function CaseForm({ submit, people }: { submit: (e: FormEvent<HTMLFormElement>) => void; people: Person[] }) { return <form onSubmit={submit}><small className="form-kicker">РЕГИСТРАЦИЯ МАТЕРИАЛОВ</small><h2>Завести дело</h2><div className="form-row"><label>НАЗВАНИЕ<input name="title" required placeholder="Кодовое название"/></label><label>ПРИОРИТЕТ<select name="priority"><option>Критический</option><option>Высокий</option><option>Средний</option><option>Низкий</option></select></label></div><div className="form-row"><label>ВЕДУЩИЙ<select name="lead">{people.map(p=><option key={p.id}>{p.callsign}</option>)}</select></label><label>МЕСТО<input name="location" placeholder="Район / адрес"/></label></div><label>КРАТКАЯ ИНФОРМАЦИЯ<textarea name="summary" required placeholder="Что произошло и что известно на данный момент…"/></label><button className="primary wide">ЗАВЕСТИ ДЕЛО</button></form> }
-function TaskForm({ submit }: { submit: (e: FormEvent<HTMLFormElement>) => void }) { return <form onSubmit={submit}><small className="form-kicker">РАСПОРЯЖЕНИЕ</small><h2>Новая задача</h2><label>ЧТО НУЖНО СДЕЛАТЬ<input name="title" required placeholder="Описание задачи"/></label><div className="form-row"><label>СРОК<input name="due" required placeholder="Сегодня, 22:00"/></label><label>МЕТКА<input name="tag" placeholder="ДЕЛО #0247"/></label></div><button className="primary wide">ПОСТАВИТЬ ЗАДАЧУ</button></form> }
+function TaskForm({ submit,cases }: { submit: (e: FormEvent<HTMLFormElement>) => void;cases:CaseFile[] }) { return <form onSubmit={submit}><small className="form-kicker">РАСПОРЯЖЕНИЕ</small><h2>Новая задача</h2><label>ЧТО НУЖНО СДЕЛАТЬ<input name="title" required placeholder="Описание задачи"/></label><div className="form-row"><label>СРОК<input name="due" required placeholder="Сегодня, 22:00"/></label><label>СВЯЗАННОЕ ДЕЛО<select name="caseId"><option value="">Без дела</option>{cases.filter(c=>c.dbId).map(c=><option key={c.id} value={c.dbId}>#{c.id} · {c.title}</option>)}</select></label></div><label>МЕТКА<input name="tag" placeholder="ОБЩЕЕ"/></label><button className="primary wide">ПОСТАВИТЬ ЗАДАЧУ</button></form> }
+
+function AuthGate({online,onLogin}:{online:boolean;onLogin:()=>void}){return <div className="auth-gate"><div className="auth-card"><div className="brand-eye">◉</div><small>BLACKWOOD DETECTIVE BUREAU</small><h1>Закрытый архив</h1><p>{online?'Для доступа к материалам подтвердите личность. Новый профиль выдаёт MASTER.':'Сервер временно недоступен. Проверьте запуск backend.'}</p><button className="primary wide" disabled={!online} onClick={onLogin}>ВОЙТИ</button></div></div>}
+
+function CodeForm({submit,people}:{submit:(e:FormEvent<HTMLFormElement>)=>void;people:Person[]}){return <form onSubmit={submit}><small className="form-kicker">УПРАВЛЕНИЕ ДОСТУПОМ</small><h2>Сменить личный код</h2><p className="form-desc">После смены кода все действующие сессии сотрудника будут закрыты.</p><label>СОТРУДНИК<select name="userId">{people.map(p=><option key={p.id} value={p.id}>{p.callsign} · {p.name}</option>)}</select></label><label>НОВЫЙ ЛИЧНЫЙ КОД<input name="code" type="password" minLength={6} required placeholder="Не менее 6 символов"/></label><button className="primary wide">ИЗМЕНИТЬ КОД</button></form>}
+
+function InformantsManager({items,onAdd,onEdit}:{items:Informant[];onAdd:()=>void;onEdit:(x:Informant)=>void}){return <><PageHead eyebrow="КОНФИДЕНЦИАЛЬНЫЕ ИСТОЧНИКИ" title="Информаторы" action={onAdd} actionText="＋ НОВЫЙ КОНТАКТ"/><div className="warning-strip">⚠ ДОСТУП ОГРАНИЧЕН</div><div className="informant-grid">{items.map((x,i)=><article className="informant" key={x.id} onDoubleClick={()=>onEdit(x)}><button className="card-edit" onClick={()=>onEdit(x)}>РЕДАКТИРОВАТЬ</button><div className="portrait">{['♟','♞','♜'][i%3]}<span>ЛИЧНОСТЬ СКРЫТА</span></div><small>КОДОВОЕ ИМЯ</small><h2>«{x.alias}»</h2><p>{x.note}</p><dl><div><dt>РАЙОН</dt><dd>{x.area}</dd></div><div><dt>НАДЁЖНОСТЬ</dt><dd>{x.reliability}%</dd></div><div><dt>ПОСЛЕДНИЙ КОНТАКТ</dt><dd>{x.last}</dd></div></dl><span className="contact">● {x.status}</span></article>)}</div></>}
+
+function TasksManager({tasks,current,onAdd,updateTask,onEdit,onOpenCase}:{tasks:Task[];current:Person;onAdd:()=>void;updateTask:(t:Task,c:'assign'|'done')=>void;onEdit:(t:Task)=>void;onOpenCase:(t:Task)=>void}){const card=(t:Task)=><article className="task" key={t.id}><button className={`check ${t.done?'checked':''}`} onClick={()=>!t.done&&updateTask(t,'done')}>{t.done?'✓':''}</button><div><button className="task-link" onClick={()=>t.caseDbId&&onOpenCase(t)}>{t.tag}</button><h4>{t.title}</h4><p>{t.done?(t.report||'Выполнено'):`СРОК: ${t.due}`}</p></div><button className="task-edit" onClick={()=>onEdit(t)}>✎</button>{!t.done&&(t.assignee?<span className="assigned">{t.assignee.slice(0,1)}</span>:<button className="take" onClick={()=>updateTask(t,'assign')}>ВЗЯТЬ</button>)}</article>;return <><PageHead eyebrow="ОПЕРАТИВНАЯ РАБОТА" title="Активные задачи" action={onAdd} actionText="＋ ПОСТАВИТЬ ЗАДАЧУ"/><div className="task-board"><section><h3>К ВЫПОЛНЕНИЮ <span>{tasks.filter(t=>!t.done).length}</span></h3>{tasks.filter(t=>!t.done).map(card)}</section><section className="done"><h3>ВЫПОЛНЕНО <span>{tasks.filter(t=>t.done).length}</span></h3>{tasks.filter(t=>t.done).map(card)}</section></div><button className="back-to-cases" onClick={()=>{}}>Задачи связаны с делами через красную метку</button></>}
+
+function InformantForm({submit,item}:{submit:(e:FormEvent<HTMLFormElement>)=>void;item:Informant|null}){return <form onSubmit={submit}><small className="form-kicker">КОНФИДЕНЦИАЛЬНЫЙ ИСТОЧНИК</small><h2>{item?'Редактировать контакт':'Новый информатор'}</h2><div className="form-row"><label>КОДОВОЕ ИМЯ<input name="alias" required defaultValue={item?.alias}/></label><label>РАЙОН<input name="area" required defaultValue={item?.area}/></label></div><label>СПЕЦИАЛИЗАЦИЯ<input name="note" required defaultValue={item?.note}/></label><div className="form-row"><label>НАДЁЖНОСТЬ, %<input name="reliability" type="number" min="0" max="100" defaultValue={item?.reliability||50}/></label><label>СТАТУС<select name="status" defaultValue={item?.status==='НА СВЯЗИ'?'ACTIVE':item?.status}><option value="ACTIVE">НА СВЯЗИ</option><option value="ЗАТИХ">ЗАТИХ</option></select></label></div><label>ЗАМЕТКИ<textarea name="notes" defaultValue={item?.notes}/></label><button className="primary wide">СОХРАНИТЬ</button></form>}
+function AspectForm({submit,aspect}:{submit:(e:FormEvent<HTMLFormElement>)=>void;aspect:AspectKey}){const names:Record<AspectKey,string>={suspects:'подозреваемого',victims:'жертву',witnesses:'свидетеля',evidence:'улику',theories:'версию'};return <form onSubmit={submit}><small className="form-kicker">МАТЕРИАЛЫ ДЕЛА</small><h2>Добавить {names[aspect]}</h2><label>ОПИСАНИЕ<input name="value" required autoFocus/></label><button className="primary wide">ДОБАВИТЬ В ДОСЬЕ</button></form>}
+function TaskEditForm({submit,task,cases}:{submit:(e:FormEvent<HTMLFormElement>)=>void;task:Task;cases:CaseFile[]}){return <form onSubmit={submit}><small className="form-kicker">РЕДАКТИРОВАНИЕ</small><h2>Задача</h2><label>ОПИСАНИЕ<input name="title" required defaultValue={task.title}/></label><div className="form-row"><label>СРОК<input name="due" defaultValue={task.due}/></label><label>ДЕЛО<select name="caseId" defaultValue={task.caseDbId||''}><option value="">Без дела</option>{cases.filter(c=>c.dbId).map(c=><option key={c.id} value={c.dbId}>#{c.id} · {c.title}</option>)}</select></label></div><label>МЕТКА<input name="tag" defaultValue={task.tag}/></label><label>ОТЧЁТ<textarea name="report" defaultValue={task.report}/></label><button className="primary wide">СОХРАНИТЬ</button></form>}
 
 export default App

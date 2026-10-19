@@ -132,6 +132,7 @@ enum UserStatus {
 }
 enum CaseStatus {
   ACTIVE
+  IN_PROGRESS
   WAITING
   CLOSED
 }
@@ -145,4 +146,5 @@ enum TaskStatus {
   OPEN
   IN_PROGRESS
   DONE
+  FROZEN
 }

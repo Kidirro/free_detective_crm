@@ -1,0 +1,139 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String     @id @default(cuid())
+  firstName String
+  lastName  String
+  callsign  String     @unique
+  password  String
+  role      UserRole   @default(DETECTIVE)
+  status    UserStatus @default(ACTIVE)
+  photoUrl  String?
+  sessions     Session[]
+  ledCases     Case[] @relation("CaseLead")
+  createdCases Case[] @relation("CaseCreator")
+  assignedTasks Task[] @relation("TaskAssignee")
+  createdTasks  Task[] @relation("TaskCreator")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique
+  userId    String
+  expiresAt DateTime
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Case {
+  id String @id @default(cuid())
+  number Int @unique @default(autoincrement())
+  title String
+  status CaseStatus @default(ACTIVE)
+  priority Priority @default(MEDIUM)
+  summary String @db.Text
+  location String?
+  leadId String
+  createdById String
+  memberIds Json @default("[]")
+  suspects Json @default("[]")
+  victims Json @default("[]")
+  witnesses Json @default("[]")
+  evidence Json @default("[]")
+  theories Json @default("[]")
+  folders Json @default("[]")
+  report String @default("") @db.Text
+  reportUrl String?
+  lead User @relation("CaseLead", fields: [leadId], references: [id])
+  createdBy User @relation("CaseCreator", fields: [createdById], references: [id])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([status])
+  @@index([leadId])
+}
+
+model Task {
+  id String @id @default(cuid())
+  title String
+  tag String @default("ОБЩЕЕ")
+  dueAt DateTime?
+  dueLabel String?
+  status TaskStatus @default(OPEN)
+  report String @default("") @db.Text
+  assigneeId String?
+  createdById String
+  assignee User? @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  createdBy User @relation("TaskCreator", fields: [createdById], references: [id])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([status])
+  @@index([assigneeId])
+}
+
+model Informant {
+  id String @id @default(cuid())
+  alias String @unique
+  realName String?
+  reliability Int @default(50)
+  area String
+  status String @default("ACTIVE")
+  specialties String @db.Text
+  notes String @default("") @db.Text
+  lastContact DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Organization {
+  id String @id @default(cuid())
+  name String @unique
+  zone String
+  threat String
+  members Int @default(0)
+  color String @default("#8e2f27")
+  notes String @default("") @db.Text
+  people Json @default("[]")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum UserRole {
+  MASTER
+  ADMIN
+  DETECTIVE
+  CHIEF
+  SENIOR_DETECTIVE
+  ANALYST
+}
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+enum CaseStatus {
+  ACTIVE
+  WAITING
+  CLOSED
+}
+enum Priority {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+}
+enum TaskStatus {
+  OPEN
+  IN_PROGRESS
+  DONE
+}

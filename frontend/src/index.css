@@ -1,0 +1,27 @@
+:root {
+  font-family: Arial, sans-serif;
+  color: #e8e5df;
+  background: #11100f;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  background: #11100f;
+}
+
+button,input,textarea,select{box-sizing:border-box}

@@ -47,6 +47,8 @@ model Case {
   leadId String
   createdById String
   memberIds Json @default("[]")
+  isRestricted Boolean @default(false)
+  allowedUserIds Json @default("[]")
   suspects Json @default("[]")
   victims Json @default("[]")
   witnesses Json @default("[]")

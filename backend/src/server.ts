@@ -37,6 +37,8 @@ async function authenticate(request: any, reply: any) {
 
 const strings = (value: unknown) => Array.isArray(value) ? value.filter(x => typeof x === 'string') as string[] : []
 const caseInclude = { lead: { select: { id: true, callsign: true, firstName: true, lastName: true } } }
+const canReadCase = (item: any, auth: AuthUser) => auth.role === 'MASTER' || !item.isRestricted || item.leadId === auth.id || strings(item.memberIds).includes(auth.id) || strings(item.allowedUserIds).includes(auth.id)
+const visibleCase = (item: any, auth: AuthUser) => canReadCase(item, auth) ? { ...item, locked: false } : { id: item.id, number: item.number, title: item.title, status: item.status, priority: item.priority, createdAt: item.createdAt, isRestricted: true, allowedUserIds: [], locked: true, lead: { id: '', callsign: 'ЗАСЕКРЕЧЕНО', firstName: '', lastName: '' }, memberIds: [], summary: '', location: null, suspects: [], victims: [], witnesses: [], evidence: [], theories: [], folders: [], boardLayout: {}, boardCards: [], boardLinks: [], report: '', reportUrl: null }
 
 async function start() {
   await app.register(cors, { origin: process.env.FRONTEND_ORIGIN || 'http://localhost:5173', credentials: true })
@@ -74,6 +76,13 @@ async function start() {
   })
   app.get('/api/auth/me', { preHandler: authenticate }, async request => (request as AuthedRequest).authUser)
   app.get('/api/users', { preHandler: authenticate }, async () => (await prisma.user.findMany({ where: { status: 'ACTIVE' }, orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }] })).map(publicUser))
+  app.delete('/api/users/:id', { preHandler: authenticate }, async (request, reply) => {
+    const auth = (request as AuthedRequest).authUser!; const id = (request.params as any).id
+    if (auth.role !== 'MASTER') return reply.code(403).send({ error: 'Удалять профили может только MASTER' })
+    if (id === auth.id) return reply.code(400).send({ error: 'Нельзя удалить собственный профиль' })
+    try { await prisma.$transaction([prisma.session.deleteMany({ where: { userId: id } }), prisma.user.update({ where: { id }, data: { status: 'INACTIVE' } })]); return { ok: true } }
+    catch (e: any) { if (e?.code === 'P2025') return reply.code(404).send({ error: 'Профиль не найден' }); throw e }
+  })
   app.patch('/api/users/:id/code', { preHandler: authenticate }, async (request, reply) => {
     const auth = (request as AuthedRequest).authUser!; const body = request.body as any
     if (auth.role !== 'MASTER') return reply.code(403).send({ error: 'Менять коды может только MASTER' })
@@ -85,7 +94,7 @@ async function start() {
     } catch (e: any) { if (e?.code === 'P2025') return reply.code(404).send({ error: 'Профиль не найден' }); throw e }
   })
 
-  app.get('/api/cases', { preHandler: authenticate }, async () => prisma.case.findMany({ include: caseInclude, orderBy: { createdAt: 'desc' } }))
+  app.get('/api/cases', { preHandler: authenticate }, async request => (await prisma.case.findMany({ include: caseInclude, orderBy: { createdAt: 'desc' } })).map(item => visibleCase(item, (request as AuthedRequest).authUser!)))
   app.post('/api/cases', { preHandler: authenticate }, async (request, reply) => {
     const body = request.body as any; const auth = (request as AuthedRequest).authUser!
     if (!body?.title?.trim() || !body?.summary?.trim() || !body?.leadId) return reply.code(400).send({ error: 'Название, сводка и ведущий обязательны' })
@@ -94,10 +103,13 @@ async function start() {
   })
   app.get('/api/cases/:id', { preHandler: authenticate }, async (request, reply) => {
     const item = await prisma.case.findUnique({ where: { id: (request.params as any).id }, include: caseInclude })
-    return item || reply.code(404).send({ error: 'Дело не найдено' })
+    return item ? visibleCase(item, (request as AuthedRequest).authUser!) : reply.code(404).send({ error: 'Дело не найдено' })
   })
   app.patch('/api/cases/:id', { preHandler: authenticate }, async (request, reply) => {
-    const b = request.body as any; const data: any = {}
+    const b = request.body as any; const data: any = {}; const auth = (request as AuthedRequest).authUser!
+    const existing = await prisma.case.findUnique({ where: { id: (request.params as any).id } })
+    if (!existing) return reply.code(404).send({ error: 'Дело не найдено' })
+    if (!canReadCase(existing, auth)) return reply.code(403).send({ error: 'Нет доступа к материалам дела' })
     for (const key of ['title','summary','location','report','reportUrl']) if (typeof b[key] === 'string') data[key] = b[key]
     for (const key of ['memberIds','suspects','victims','witnesses','evidence','theories','folders']) if (Array.isArray(b[key])) data[key] = b[key]
     if (b.boardLayout && typeof b.boardLayout === 'object' && !Array.isArray(b.boardLayout)) data.boardLayout = b.boardLayout
@@ -106,23 +118,49 @@ async function start() {
     if (b.status && Object.values(CaseStatus).includes(b.status)) data.status = b.status
     if (b.priority && Object.values(Priority).includes(b.priority)) data.priority = b.priority
     if (b.leadId) data.leadId = b.leadId
+    if (b.isRestricted !== undefined || b.allowedUserIds !== undefined) {
+      if (auth.role !== 'MASTER') return reply.code(403).send({ error: 'Доступ к делу меняет только MASTER' })
+      if (typeof b.isRestricted === 'boolean') data.isRestricted = b.isRestricted
+      if (Array.isArray(b.allowedUserIds)) data.allowedUserIds = strings(b.allowedUserIds)
+    }
     try { return await prisma.case.update({ where: { id: (request.params as any).id }, data, include: caseInclude }) }
     catch (e: any) { if (e?.code === 'P2025') return reply.code(404).send({ error: 'Дело не найдено' }); throw e }
   })
+  app.delete('/api/cases/:id', { preHandler: authenticate }, async (request, reply) => {
+    const auth = (request as AuthedRequest).authUser!; const existing = await prisma.case.findUnique({ where: { id: (request.params as any).id } })
+    if (existing && !canReadCase(existing, auth)) return reply.code(403).send({ error: 'Нет доступа к материалам дела' })
+    try { await prisma.case.delete({ where: { id: (request.params as any).id } }); return { ok: true } }
+    catch (e: any) { if (e?.code === 'P2025') return reply.code(404).send({ error: 'Дело не найдено' }); throw e }
+  })
 
-  app.get('/api/tasks', { preHandler: authenticate }, async () => prisma.task.findMany({ include: { assignee: { select: { id: true, callsign: true } }, case: { select: { id: true, number: true, title: true } } }, orderBy: { createdAt: 'desc' } }))
+  app.get('/api/tasks', { preHandler: authenticate }, async request => {
+    const auth = (request as AuthedRequest).authUser!
+    const items = await prisma.task.findMany({ include: { assignee: { select: { id: true, callsign: true } }, case: { select: { id: true, number: true, title: true, isRestricted: true, leadId: true, memberIds: true, allowedUserIds: true } } }, orderBy: { createdAt: 'desc' } })
+    return items.filter(item => !item.case || canReadCase(item.case, auth))
+  })
   app.post('/api/tasks', { preHandler: authenticate }, async (request, reply) => {
     const b = request.body as any; const auth = (request as AuthedRequest).authUser!
     if (!b?.title?.trim()) return reply.code(400).send({ error: 'Описание задачи обязательно' })
+    if (b.caseId) { const linked = await prisma.case.findUnique({ where: { id: b.caseId } }); if (!linked || !canReadCase(linked, auth)) return reply.code(403).send({ error: 'Нет доступа к выбранному делу' }) }
     return reply.code(201).send(await prisma.task.create({ data: { title: b.title.trim(), tag: b.tag?.trim() || 'ОБЩЕЕ', dueLabel: b.dueLabel?.trim() || null, caseId: b.caseId || null, createdById: auth.id }, include: { case: true } }))
   })
   app.patch('/api/tasks/:id', { preHandler: authenticate }, async (request, reply) => {
-    const b = request.body as any; const data: any = {}
+    const b = request.body as any; const data: any = {}; const auth = (request as AuthedRequest).authUser!
+    const existing = await prisma.task.findUnique({ where: { id: (request.params as any).id }, include: { case: true } })
+    if (!existing) return reply.code(404).send({ error: 'Задача не найдена' })
+    if (existing.case && !canReadCase(existing.case, auth)) return reply.code(403).send({ error: 'Нет доступа к задаче' })
+    if (typeof b.caseId === 'string') { const linked = await prisma.case.findUnique({ where: { id: b.caseId } }); if (!linked || !canReadCase(linked, auth)) return reply.code(403).send({ error: 'Нет доступа к выбранному делу' }) }
     for (const key of ['title','tag','dueLabel','report']) if (typeof b[key] === 'string') data[key] = b[key]
     if (b.status && Object.values(TaskStatus).includes(b.status)) data.status = b.status
     if (b.assigneeId === null || typeof b.assigneeId === 'string') data.assigneeId = b.assigneeId
     if (b.caseId === null || typeof b.caseId === 'string') data.caseId = b.caseId
     try { return await prisma.task.update({ where: { id: (request.params as any).id }, data, include: { assignee: true } }) }
+    catch (e: any) { if (e?.code === 'P2025') return reply.code(404).send({ error: 'Задача не найдена' }); throw e }
+  })
+  app.delete('/api/tasks/:id', { preHandler: authenticate }, async (request, reply) => {
+    const auth = (request as AuthedRequest).authUser!; const existing = await prisma.task.findUnique({ where: { id: (request.params as any).id }, include: { case: true } })
+    if (existing?.case && !canReadCase(existing.case, auth)) return reply.code(403).send({ error: 'Нет доступа к задаче' })
+    try { await prisma.task.delete({ where: { id: (request.params as any).id } }); return { ok: true } }
     catch (e: any) { if (e?.code === 'P2025') return reply.code(404).send({ error: 'Задача не найдена' }); throw e }
   })
 
@@ -137,6 +175,10 @@ async function start() {
     for (const key of ['alias','realName','regCode','photoUrl','area','status','specialties','notes']) if (typeof b[key] === 'string') data[key] = b[key]
     if (b.reliability !== undefined) data.reliability = Math.max(0, Math.min(100, Number(b.reliability) || 0))
     try { return await prisma.informant.update({ where: { id: (request.params as any).id }, data }) }
+    catch (e: any) { if (e?.code === 'P2025') return reply.code(404).send({ error: 'Информатор не найден' }); throw e }
+  })
+  app.delete('/api/informants/:id', { preHandler: authenticate }, async (request, reply) => {
+    try { await prisma.informant.delete({ where: { id: (request.params as any).id } }); return { ok: true } }
     catch (e: any) { if (e?.code === 'P2025') return reply.code(404).send({ error: 'Информатор не найден' }); throw e }
   })
   app.get('/api/organizations', { preHandler: authenticate }, async () => prisma.organization.findMany({ orderBy: { name: 'asc' } }))

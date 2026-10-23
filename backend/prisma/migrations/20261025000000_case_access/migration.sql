@@ -1,0 +1,3 @@
+ALTER TABLE "Case"
+ADD COLUMN "isRestricted" BOOLEAN NOT NULL DEFAULT false,
+ADD COLUMN "allowedUserIds" JSONB NOT NULL DEFAULT '[]';
